@@ -6,7 +6,13 @@
  */
 SCHED_FEAT(PLACE_LAG, true)
 SCHED_FEAT(PLACE_DEADLINE_INITIAL, true)
+#ifdef CONFIG_SCHED_BORE
+SCHED_FEAT(RUN_TO_PARITY, false)
+SCHED_FEAT(PLACE_DEADLINE_WAKEUP, true)
+#else // !CONFIG_SCHED_BORE
 SCHED_FEAT(RUN_TO_PARITY, true)
+SCHED_FEAT(PLACE_DEADLINE_WAKEUP, false)
+#endif // CONFIG_SCHED_BORE
 
 /*
  * Prefer to schedule the task we woke last (assuming it failed

@@ -108,7 +108,7 @@ EXPORT_TRACEPOINT_SYMBOL_GPL(pelt_rt_tp);
 EXPORT_TRACEPOINT_SYMBOL_GPL(pelt_dl_tp);
 EXPORT_TRACEPOINT_SYMBOL_GPL(pelt_irq_tp);
 EXPORT_TRACEPOINT_SYMBOL_GPL(pelt_se_tp);
-EXPORT_TRACEPOINT_SYMBOL_GPL(pelt_thermal_tp);
+EXPORT_TRACEPOINT_SYMBOL_GPL(pelt_hw_tp);
 EXPORT_TRACEPOINT_SYMBOL_GPL(sched_cpu_capacity_tp);
 EXPORT_TRACEPOINT_SYMBOL_GPL(sched_overutilized_tp);
 EXPORT_TRACEPOINT_SYMBOL_GPL(sched_util_est_cfs_tp);
@@ -723,7 +723,6 @@ static void update_rq_clock_task(struct rq *rq, s64 delta)
 
 	rq->prev_irq_time += irq_delta;
 	delta -= irq_delta;
-	psi_account_irqtime(rq->curr, irq_delta);
 	delayacct_irq(rq->curr, irq_delta);
 #endif
 #ifdef CONFIG_PARAVIRT_TIME_ACCOUNTING
@@ -4516,6 +4515,138 @@ int wake_up_state(struct task_struct *p, unsigned int state)
 	return try_to_wake_up(p, state, 0);
 }
 
+#ifdef CONFIG_SCHED_BORE
+extern u8   sched_burst_fork_atavistic;
+extern uint sched_burst_cache_lifetime;
+
+static void __init sched_init_bore(void) {
+	init_task.se.burst_time = 0;
+	init_task.se.prev_burst_penalty = 0;
+	init_task.se.curr_burst_penalty = 0;
+	init_task.se.burst_penalty = 0;
+	init_task.se.burst_score = 0;
+	init_task.se.child_burst_last_cached = 0;
+}
+
+inline void sched_fork_bore(struct task_struct *p) {
+	p->se.burst_time = 0;
+	p->se.curr_burst_penalty = 0;
+	p->se.burst_score = 0;
+	p->se.child_burst_last_cached = 0;
+}
+
+static u32 count_child_tasks(struct task_struct *p) {
+	struct task_struct *child;
+	u32 cnt = 0;
+	list_for_each_entry(child, &p->children, sibling) {cnt++;}
+	return cnt;
+}
+
+static inline bool task_is_inheritable(struct task_struct *p) {
+	return (p->sched_class == &fair_sched_class);
+}
+
+static inline bool child_burst_cache_expired(struct task_struct *p, u64 now) {
+	u64 expiration_time =
+		p->se.child_burst_last_cached + sched_burst_cache_lifetime;
+	return ((s64)(expiration_time - now) < 0);
+}
+
+static void __update_child_burst_cache(
+	struct task_struct *p, u32 cnt, u32 sum, u64 now) {
+	u8 avg = 0;
+	if (cnt) avg = sum / cnt;
+	p->se.child_burst = max(avg, p->se.burst_penalty);
+	p->se.child_burst_cnt = cnt;
+	p->se.child_burst_last_cached = now;
+}
+
+static inline void update_child_burst_direct(struct task_struct *p, u64 now) {
+	struct task_struct *child;
+	u32 cnt = 0;
+	u32 sum = 0;
+
+	list_for_each_entry(child, &p->children, sibling) {
+		if (!task_is_inheritable(child)) continue;
+		cnt++;
+		sum += child->se.burst_penalty;
+	}
+
+	__update_child_burst_cache(p, cnt, sum, now);
+}
+
+static inline u8 __inherit_burst_direct(struct task_struct *p, u64 now) {
+	struct task_struct *parent = p->real_parent;
+	if (child_burst_cache_expired(parent, now))
+		update_child_burst_direct(parent, now);
+
+	return parent->se.child_burst;
+}
+
+static void update_child_burst_topological(
+	struct task_struct *p, u64 now, u32 depth, u32 *acnt, u32 *asum) {
+	struct task_struct *child, *dec;
+	u32 cnt = 0, dcnt = 0;
+	u32 sum = 0;
+
+	list_for_each_entry(child, &p->children, sibling) {
+		dec = child;
+		while ((dcnt = count_child_tasks(dec)) == 1)
+			dec = list_first_entry(&dec->children, struct task_struct, sibling);
+		
+		if (!dcnt || !depth) {
+			if (!task_is_inheritable(dec)) continue;
+			cnt++;
+			sum += dec->se.burst_penalty;
+			continue;
+		}
+		if (!child_burst_cache_expired(dec, now)) {
+			cnt += dec->se.child_burst_cnt;
+			sum += (u32)dec->se.child_burst * dec->se.child_burst_cnt;
+			continue;
+		}
+		update_child_burst_topological(dec, now, depth - 1, &cnt, &sum);
+	}
+
+	__update_child_burst_cache(p, cnt, sum, now);
+	*acnt += cnt;
+	*asum += sum;
+}
+
+static inline u8 __inherit_burst_topological(struct task_struct *p, u64 now) {
+	struct task_struct *anc = p->real_parent;
+	u32 cnt = 0, sum = 0;
+
+	while (anc->real_parent != anc && count_child_tasks(anc) == 1)
+		anc = anc->real_parent;
+
+	if (child_burst_cache_expired(anc, now))
+		update_child_burst_topological(
+			anc, now, sched_burst_fork_atavistic - 1, &cnt, &sum);
+
+	return anc->se.child_burst;
+}
+
+static inline void inherit_burst(struct task_struct *p) {
+	u8 burst_cache;
+	u64 now = ktime_get_ns();
+
+	read_lock(&tasklist_lock);
+	burst_cache = likely(sched_burst_fork_atavistic)?
+		__inherit_burst_topological(p, now):
+		__inherit_burst_direct(p, now);
+	read_unlock(&tasklist_lock);
+
+	p->se.prev_burst_penalty = max(p->se.prev_burst_penalty, burst_cache);
+}
+
+static void sched_post_fork_bore(struct task_struct *p) {
+	if (p->sched_class == &fair_sched_class)
+		inherit_burst(p);
+	p->se.burst_penalty = p->se.prev_burst_penalty;
+}
+#endif // CONFIG_SCHED_BORE
+
 /*
  * Perform scheduler related setup for a newly forked process p.
  * p is forked by current.
@@ -4532,6 +4663,9 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	p->se.prev_sum_exec_runtime	= 0;
 	p->se.nr_migrations		= 0;
 	p->se.vruntime			= 0;
+#ifdef CONFIG_SCHED_BORE
+	sched_fork_bore(p);
+#endif // CONFIG_SCHED_BORE
 	p->se.vlag			= 0;
 	p->se.slice			= sysctl_sched_base_slice;
 	INIT_LIST_HEAD(&p->se.group_node);
@@ -4741,7 +4875,6 @@ static struct ctl_table sched_core_sysctls[] = {
 		.extra2		= SYSCTL_FOUR,
 	},
 #endif /* CONFIG_NUMA_BALANCING */
-	{}
 };
 static int __init sched_core_sysctl_init(void)
 {
@@ -4848,6 +4981,9 @@ void sched_cgroup_fork(struct task_struct *p, struct kernel_clone_args *kargs)
 
 void sched_post_fork(struct task_struct *p)
 {
+#ifdef CONFIG_SCHED_BORE
+	sched_post_fork_bore(p);
+#endif // CONFIG_SCHED_BORE
 	uclamp_post_fork(p);
 }
 
@@ -5662,13 +5798,13 @@ static inline u64 cpu_resched_latency(struct rq *rq) { return 0; }
  * This function gets called by the timer code, with HZ frequency.
  * We call it with interrupts disabled.
  */
-void scheduler_tick(void)
+void sched_tick(void)
 {
 	int cpu = smp_processor_id();
 	struct rq *rq = cpu_rq(cpu);
-	struct task_struct *curr = rq->curr;
+	struct task_struct *curr;
 	struct rq_flags rf;
-	unsigned long thermal_pressure;
+	unsigned long hw_pressure;
 	u64 resched_latency;
 
 	if (housekeeping_cpu(cpu, HK_TYPE_TICK))
@@ -5678,9 +5814,12 @@ void scheduler_tick(void)
 
 	rq_lock(rq, &rf);
 
+	curr = rq->curr;
+	psi_account_irqtime(rq, curr, NULL);
+
 	update_rq_clock(rq);
-	thermal_pressure = arch_scale_thermal_pressure(cpu_of(rq));
-	update_thermal_load_avg(rq_clock_thermal(rq), rq, thermal_pressure);
+	hw_pressure = arch_scale_hw_pressure(cpu_of(rq));
+	update_hw_load_avg(rq_clock_task(rq), rq, hw_pressure);
 	curr->sched_class->task_tick(rq, curr, 0);
 	if (sched_feat(LATENCY_WARN))
 		resched_latency = cpu_resched_latency(rq);
@@ -5700,7 +5839,7 @@ void scheduler_tick(void)
 
 #ifdef CONFIG_SMP
 	rq->idle_balance = idle_cpu(cpu);
-	trigger_load_balance(rq);
+	sched_balance_trigger(rq);
 #endif
 }
 
@@ -6585,7 +6724,7 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
  *      paths. For example, see arch/x86/entry_64.S.
  *
  *      To drive preemption between tasks, the scheduler sets the flag in timer
- *      interrupt handler scheduler_tick().
+ *      interrupt handler sched_tick().
  *
  *   3. Wakeups don't really cause entry into schedule(). They add a
  *      task to the run-queue and that's it.
@@ -6738,6 +6877,7 @@ static void __sched notrace __schedule(unsigned int sched_mode)
 		++*switch_count;
 
 		migrate_disable_switch(rq, prev);
+		psi_account_irqtime(rq, prev, next);
 		psi_sched_switch(prev, next, !task_on_rq_queued(prev));
 
 		trace_sched_switch(sched_mode & SM_MASK_PREEMPT, prev, next, prev_state);
@@ -9930,6 +10070,11 @@ void __init sched_init(void)
 #ifdef CONFIG_SMP
 	BUG_ON(&dl_sched_class != &stop_sched_class + 1);
 #endif
+
+#ifdef CONFIG_SCHED_BORE
+	sched_init_bore();
+	printk(KERN_INFO "BORE (Burst-Oriented Response Enhancer) CPU Scheduler modification 5.1.4 by Masahito Suzuki");
+#endif // CONFIG_SCHED_BORE
 
 	wait_bit_init();
 
