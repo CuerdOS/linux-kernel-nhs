@@ -1,6 +1,6 @@
-From 28fa13d640ef65ae52e459bc64b3ef50ac7df34b Mon Sep 17 00:00:00 2001
+From 9e4c63a4ae337a940585d5165dc75d00f493c3cc Mon Sep 17 00:00:00 2001
 From: Piotr Gorski <lucjan.lucjanov@gmail.com>
-Date: Mon, 27 May 2024 08:01:18 +0200
+Date: Mon, 27 May 2024 08:01:47 +0200
 Subject: [PATCH] mm-6.10: add le9uo
 
 Signed-off-by: Piotr Gorski <lucjan.lucjanov@gmail.com>
@@ -261,7 +261,7 @@ index 3ec04933f..97990f310 100644
  
  /*
 diff --git a/mm/vmscan.c b/mm/vmscan.c
-index 2e34de9cd..f283ce71a 100644
+index 2e34de9cd..1b6a27012 100644
 --- a/mm/vmscan.c
 +++ b/mm/vmscan.c
 @@ -139,6 +139,15 @@ struct scan_control {
@@ -284,7 +284,7 @@ index 2e34de9cd..f283ce71a 100644
  #define prefetchw_prev_lru_folio(_folio, _base, _field) do { } while (0)
  #endif
  
-+bool sysctl_workingset_protection __read_mostly = true;
++bool sysctl_workingset_protection __read_mostly = false;
 +u8 sysctl_anon_min_ratio  __read_mostly = CONFIG_ANON_MIN_RATIO;
 +u8 sysctl_clean_low_ratio __read_mostly = CONFIG_CLEAN_LOW_RATIO;
 +u8 sysctl_clean_min_ratio __read_mostly = CONFIG_CLEAN_MIN_RATIO;

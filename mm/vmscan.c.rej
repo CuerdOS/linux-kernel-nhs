@@ -1,0 +1,10 @@
+--- mm/vmscan.c
++++ mm/vmscan.c
+@@ -4902,6 +5032,7 @@ static int shrink_one(struct lruvec *lruvec, struct scan_control *sc)
+ 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
+ 	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
+ 
++	prepare_workingset_protection(pgdat, sc);
+ 	mem_cgroup_calculate_protection(NULL, memcg);
+ 
+ 	if (mem_cgroup_below_min(NULL, memcg))
