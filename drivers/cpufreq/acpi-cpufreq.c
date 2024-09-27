@@ -50,6 +50,8 @@ enum {
 #define AMD_MSR_RANGE		(0x7)
 #define HYGON_MSR_RANGE		(0x7)
 
+#define MSR_K7_HWCR_CPB_DIS	(1ULL << 25)
+
 struct acpi_cpufreq_data {
 	unsigned int resume;
 	unsigned int cpu_feature;
@@ -137,7 +139,6 @@ static int set_boost(struct cpufreq_policy *policy, int val)
 			 (void *)(long)val, 1);
 	pr_debug("CPU %*pbl: Core Boosting %s.\n",
 		 cpumask_pr_args(policy->cpus), str_enabled_disabled(val));
-	policy->boost_enabled = val;
 
 	return 0;
 }
